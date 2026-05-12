@@ -16,8 +16,12 @@
  */
 package org.apache.commons.fileupload2.core;
 
-import java.io.ByteArrayOutputStream;
 import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.Objects;
 
 /**
  * Utility class to decode/encode character set on HTTP Header fields based on RFC 2231. This implementation adheres to RFC 5987 in particular, which was
@@ -61,57 +65,175 @@ final class RFC2231Utils {
     }
 
     /**
+     * Definition of attribute-char per RFC 2231 Section 7.
+     * <p>
+     * attribute-char := &lt;any (US-ASCII) CHAR except SPACE, CTLs, "*", "'", "%", or tspecials&gt;
+     */
+    private static final boolean[] IS_ATTRIBUTE_CHAR;
+
+    /**
+     * Percent encoded hex digits, only accept 0123456789ABCDEF.
+     */
+    private static final boolean[] IS_HEX_DIGITS;
+    static {
+        final int ARRAY_SIZE = 128;
+
+        // tspecials defined in rfc 2616
+        String tspecials = "()<>@,;:\\\"/[]?={}";
+        String octets = "0123456789ABCDEF";
+
+        IS_HEX_DIGITS = new boolean[ARRAY_SIZE];
+        IS_ATTRIBUTE_CHAR = new boolean[ARRAY_SIZE];
+        for (int i = 0; i < ARRAY_SIZE; i++) {
+            IS_HEX_DIGITS[i] = octets.indexOf(i) >= 0;
+            if (i <= 32 || i >= 127) {
+                IS_ATTRIBUTE_CHAR[i] = false;
+            } else if (i == '*' || i == '\'' || i == '%') {
+                IS_ATTRIBUTE_CHAR[i] = false;
+            } else if (tspecials.indexOf(i) != -1) {
+                IS_ATTRIBUTE_CHAR[i] = false;
+            } else {
+                IS_ATTRIBUTE_CHAR[i] = true;
+            }
+        }
+    }
+
+	private static boolean isAttributeChar(char c) {
+		return c >= 0 && c <= 127 && IS_ATTRIBUTE_CHAR[c];
+	}
+
+	private static boolean isHexDigitChar(char c) {
+		return c >= 0 && c <= 127 && IS_HEX_DIGITS[c];
+	}
+
+    /**
      * Decodes a string of text obtained from a HTTP header as per RFC 2231
      *
      * <strong>Eg 1.</strong> {@code us-ascii'en-us'This%20is%20%2A%2A%2Afun%2A%2A%2A} will be decoded to {@code This is ***fun***}
      *
      * <strong>Eg 2.</strong> {@code iso-8859-1'en'%A3%20rate} will be decoded to {@code £ rate}.
      *
-     * <strong>Eg 3.</strong> {@code UTF-8''%c2%a3%20and%20%e2%82%ac%20rates} will be decoded to {@code £ and € rates}.
+     * <strong>Eg 3.</strong> {@code UTF-8''%C2%A3%20and%20%E2%82%AC%20rates} will be decoded to {@code £ and € rates}.
      *
      * @param encodedText   Text to be decoded has a format of {@code <charset>'<language>'<encoded_value>} and ASCII only
      * @return Decoded text based on charset encoding
      * @throws UnsupportedEncodingException The requested character set wasn't found.
+     * @throws IllegalArgumentException if the encodedValue or decodedValue contains illegal characters
      */
-    static String decodeText(final String encodedText) throws UnsupportedEncodingException {
+    static String decodeText(final String encodedText) throws UnsupportedEncodingException, IllegalArgumentException {
         final var langDelimitStart = encodedText.indexOf('\'');
         if (langDelimitStart == -1) {
             // missing charset
-            return encodedText;
+            throw new IllegalArgumentException("RFC2231Utils: Missing charset");
         }
         final var mimeCharset = encodedText.substring(0, langDelimitStart);
         final var langDelimitEnd = encodedText.indexOf('\'', langDelimitStart + 1);
         if (langDelimitEnd == -1) {
             // missing language
-            return encodedText;
+            throw new IllegalArgumentException("RFC2231Utils: Unclosed quote");
         }
-        final var bytes = fromHex(encodedText.substring(langDelimitEnd + 1));
-        return new String(bytes, getJavaCharset(mimeCharset));
+
+        String encodedValue = encodedText.substring(langDelimitEnd + 1);
+        return decodeValue(encodedValue, getJavaCharset(mimeCharset));
     }
 
     /**
-     * Converts {@code text} to their corresponding Hex value.
+     * Decodes an encoded parameter value string using a specific charset. The supplied charset is used to determine
+     * what characters are represented by any consecutive sequences of the form "<i>{@code %HH}</i>".
+     * <p>
+     * Note: This implementation will throw an {@link java.lang.IllegalArgumentException} when illegal strings are
+     * encountered.
      *
-     * @param text   ASCII text input
-     * @return Byte array of characters decoded from ASCII table
+     * @param encodedValue the ASCII {@code String} to decode
+     * @param charset      the given charset name
+     * @return the newly decoded value {@code String}
+     * @throws UnsupportedEncodingException if the named charset is not supported
+     * @throws NullPointerException         if {@code encodedValue} or {@code charset} is {@code null}
+     * @throws IllegalArgumentException     if the encodedValue or decodedValue contains illegal characters
+     * @see URLEncoder#encode(java.lang.String, java.nio.charset.Charset)
      */
-    private static byte[] fromHex(final String text) {
-        final var shift = 4;
-        final var out = new ByteArrayOutputStream(text.length());
-        for (var i = 0; i < text.length();) {
-            final var c = text.charAt(i++);
-            if (c == '%') {
-                if (i > text.length() - 2) {
-                    break; // unterminated sequence
+    private static String decodeValue(String encodedValue, String charset) throws UnsupportedEncodingException {
+        Objects.requireNonNull(charset, "Charset");
+        Charset cs;
+        try {
+            cs = Charset.forName(charset);
+        } catch (UnsupportedCharsetException | IllegalCharsetNameException x) {
+            throw new UnsupportedEncodingException(charset);
+        }
+        boolean needToChange = false;
+        int numChars = encodedValue.length();
+        StringBuilder sb = new StringBuilder(numChars > 500 ? numChars / 2 : numChars);
+        int i = 0;
+
+        char c;
+        byte[] bytes = null;
+        while (i < numChars) {
+            c = encodedValue.charAt(i);
+            switch (c) {
+            case '%':
+                /*
+                 * Starting with this instance of %, process all consecutive substrings of the form %xy. Each substring
+                 * %xy will yield a byte. Convert all consecutive bytes obtained this way to whatever character(s) they
+                 * represent in the provided encoding.
+                 */
+
+                try {
+
+                    // (numChars-i)/3 is an upper bound for the number
+                    // of remaining bytes
+                    if (bytes == null)
+                        bytes = new byte[(numChars - i) / 3];
+                    int pos = 0;
+
+                    while (((i + 2) < numChars) && (c == '%')) {
+                        int v = Integer.parseInt(encodedValue, i + 1, i + 3, 16);
+                        if (v < 0)
+                            throw new IllegalArgumentException("RFC2231Utils: Illegal hex characters in escape "
+                                    + "(%HH) pattern - negative value");
+
+                        if (!(isHexDigitChar(encodedValue.charAt(i + 1))
+                                && isHexDigitChar(encodedValue.charAt(i + 2)))) {
+                            throw new IllegalArgumentException("RFC2231Utils: Illegal hex characters in escape "
+                                    + "(%HH) pattern - only 0-9 / A-F allowed");
+                        }
+                        bytes[pos++] = (byte) v;
+                        i += 3;
+                        if (i < numChars)
+                            c = encodedValue.charAt(i);
+                    }
+
+                    // A trailing, incomplete byte encoding such as
+                    // "%x" will cause an exception to be thrown
+
+                    if ((i < numChars) && (c == '%'))
+                        throw new IllegalArgumentException("RFC2231Utils: Incomplete trailing escape (%) pattern");
+
+                    String next = new String(bytes, 0, pos, cs); // new String(bytes, 0, pos, charset);
+                    for (char cc : next.toCharArray()) {
+                        // Additional validation: stop processing if CTLs encountered, though CTLs in "%HH%" is not
+                        // disallowed explicitly by RFC
+                        if (cc == 0x00 || cc < 0x20) {
+                            throw new IllegalArgumentException("RFC2231Utils: Illegal decoded char");
+                        }
+                    }
+                    sb.append(next);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            "RFC2231Utils: Illegal hex characters in escape (%) pattern - " + e.getMessage());
                 }
-                final var b1 = HEX_DECODE[text.charAt(i++) & MASK];
-                final var b2 = HEX_DECODE[text.charAt(i++) & MASK];
-                out.write(b1 << shift | b2);
-            } else {
-                out.write((byte) c);
+                needToChange = true;
+                break;
+            default:
+                if (c < 0 || c > 0x7f || !isAttributeChar(c)) {
+                    throw new IllegalArgumentException("RFC2231Utils: Illegal attribute-char");
+                }
+                sb.append(c);
+                i++;
+                break;
             }
         }
-        return out.toByteArray();
+
+        return (needToChange ? sb.toString() : encodedValue);
     }
 
     private static String getJavaCharset(final String mimeCharset) {

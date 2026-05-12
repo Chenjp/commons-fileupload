@@ -169,15 +169,20 @@ public class ParameterParser {
         while (hasChar()) {
             paramName = parseToken(new char[] { '=', separator });
             paramValue = null;
+            boolean hasEncodedValue = RFC2231Utils.hasEncodedValue(paramName);
             if (hasChar() && charArray[pos] == '=') {
                 pos++; // skip '='
                 paramValue = parseQuotedToken(new char[] { separator });
 
                 if (paramValue != null) {
                     try {
-                        paramValue = RFC2231Utils.hasEncodedValue(paramName) ? RFC2231Utils.decodeText(paramValue) : MimeUtils.decodeText(paramValue);
+                        paramValue = hasEncodedValue ? RFC2231Utils.decodeText(paramValue) : MimeUtils.decodeText(paramValue);
                     } catch (final UnsupportedEncodingException ignored) {
-                        // let's keep the original value in this case
+                        // the original value may dangerous
+                        paramValue = null;
+                    } catch (final IllegalArgumentException iae) {
+                        // discard the original value if illegal characters in parameter value
+                        paramValue = null;
                     }
                 }
             }
@@ -185,6 +190,9 @@ public class ParameterParser {
                 pos++; // skip separator
             }
             if (paramName != null && !paramName.isEmpty()) {
+                if (hasEncodedValue && paramValue == null) {
+                    continue;
+                }
                 paramName = RFC2231Utils.stripDelimiter(paramName);
                 if (this.lowerCaseNames) {
                     paramName = paramName.toLowerCase(Locale.ROOT);

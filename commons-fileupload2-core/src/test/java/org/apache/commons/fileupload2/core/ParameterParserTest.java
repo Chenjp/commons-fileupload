@@ -88,10 +88,10 @@ class ParameterParserTest {
         params = parser.parse(s, new char[] { ',', ';' });
         assertEquals("UTF-8''%61%62%63", params.get("file*name"));
 
-        // Should not decode if param-value does not follow <charset>'<lang>'<encoded>
+        // Ignore the param if param-value does not follow <charset>'<lang>'<encoded>
         s = "Content-Disposition: form-data; name=\"file\"; filename*=a'bc\r\n";
         params = parser.parse(s, new char[] { ',', ';' });
-        assertEquals("a'bc", params.get("filename"));
+        assertNull(params.get("filename"));
 
         // Should not decode if param-name doesn't have '*' at end
         s = "Content-Disposition: form-data; name=\"file\"; filename=a'b'c\r\n";

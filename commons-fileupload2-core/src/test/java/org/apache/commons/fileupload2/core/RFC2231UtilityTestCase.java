@@ -48,7 +48,31 @@ public final class RFC2231UtilityTestCase {
 
     @Test
     void testDecodeUtf8() throws Exception {
-        assertEncoded("\u00a3 \u0061\u006e\u0064 \u20ac \u0072\u0061\u0074\u0065\u0073", "UTF-8''%c2%a3%20and%20%e2%82%ac%20rates"); // "£ and € rates"
+        assertEncoded("\u00a3 \u0061\u006e\u0064 \u20ac \u0072\u0061\u0074\u0065\u0073", "UTF-8''%C2%A3%20and%20%E2%82%AC%20rates"); // "£ and € rates"
+    }
+
+    @Test
+    void testDecodeUtf8_invalid_input() throws Exception {
+    	assertThrows(IllegalArgumentException.class, ()->RFC2231Utils.decodeText("UTF-8''%c2%a3%20and%20%e2%82%ac%20rates"));
+    	// lowercase a-f is not supported
+    }
+
+    @Test
+    void testDecodeUtf8_invalid_input2() throws Exception {
+        String source = new String(
+                new byte[] { (byte) 0xe9, (byte) 0x98, (byte) 0xae, (byte) 0xe9, (byte) 0x98, (byte) 0xae }, "UTF-8");
+        assertThrows(IllegalArgumentException.class, () -> RFC2231Utils.decodeText("UTF-8''" + source));
+    }
+
+    @Test
+    void testDecodeUtf16() throws Exception {
+        String utf16Source = "\u8a2e.txt";
+        byte[] bb = utf16Source.getBytes("utf-16");
+        StringBuilder buf = new StringBuilder();
+        for(byte b:bb) {
+            buf.append(String.format("%%%02X", b));
+        }
+        assertEquals(utf16Source, RFC2231Utils.decodeText("UTF-16''" + buf.toString()));
     }
 
     @Test
@@ -65,7 +89,8 @@ public final class RFC2231UtilityTestCase {
 
     @Test
     void testNoNeedToDecode() throws Exception {
-        assertEncoded("abc", "abc");
+        assertEncoded("abc", "utf-8''abc");
+        assertThrows(IllegalArgumentException.class,()->RFC2231Utils.decodeText("abc"));
     }
 
     @Test
@@ -81,5 +106,21 @@ public final class RFC2231UtilityTestCase {
 
         final var nameWithoutAsterisk = "paramname";
         assertEquals("paramname", RFC2231Utils.stripDelimiter(nameWithoutAsterisk));
+    }
+
+    @Test
+    void testUtf8_multibytes() throws Exception {
+        String filename = new String(new byte[] { (byte) 0xe8, (byte) 0xa8, (byte) 0xae, (byte) 0xe8, (byte) 0xa8,
+                (byte) 0xae, (byte) 0xe8, (byte) 0xa8, (byte) 0xaf, (byte) 0xe8, (byte) 0xa9, (byte) 0xb2, (byte) 0xe8,
+                (byte) 0xa9, (byte) 0xa3, (byte) 'e', (byte) '.', (byte) 'j', (byte) 's', (byte) 0xe8, (byte) 0xa9,
+                (byte) 0xb0 }, "utf-8");
+        assertThrows(IllegalArgumentException.class, ()->RFC2231Utils.decodeText("UTF-8''" + filename));
+    }
+    
+    @Test
+    void testInvalidEncodedValue() throws Exception {
+        String filename = "\u8a2e\u8a2e\u8a2f\u8a72\u8a63e.js\u8a70";
+        assertThrows(IllegalArgumentException.class, () -> RFC2231Utils.decodeText("UTF-8''" + filename));
+        assertThrows(IllegalArgumentException.class, () -> RFC2231Utils.decodeText("UTF-8''" + filename));
     }
 }
